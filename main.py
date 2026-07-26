@@ -14,10 +14,6 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# ==========================================
-# تنظیمات اصلی
-# ==========================================
-# 💡 توکن اکنون به صورت امن از متغیرهای محیطی Railway خوانده می‌شود
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 router = Router()
@@ -27,13 +23,9 @@ if os.path.exists(SESSION_BASE_DIR):
     shutil.rmtree(SESSION_BASE_DIR, ignore_errors=True)
 os.makedirs(SESSION_BASE_DIR, exist_ok=True)
 
-# تعریف استیت برای دریافت شماره الگو
 class CopierState(StatesGroup):
     waiting_for_template = State()
 
-# ==========================================
-# لیست پروکسی‌ها
-# ==========================================
 PROXY_LIST = [
     "http://n4w32tknlcwt:cr4ownjm7lrjb1a@216.26.233.27:3129",
     "http://n4w32tknlcwt:cr4ownjm7lrjb1a@45.3.46.118:3129",
@@ -72,9 +64,6 @@ def get_random_proxy():
     selected = random.choice(PROXY_LIST)
     return {"http": selected, "https": selected}
 
-# ==========================================
-# توابع کار با فایل و توکن
-# ==========================================
 def get_tokens_from_file(file_path):
     access_token, refresh_token = None, None
     try:
@@ -123,9 +112,6 @@ def get_user_id_from_token(token):
     except Exception:
         return 0
 
-# ==========================================
-# کلاس API
-# ==========================================
 class OkalaAPI:
     def __init__(self):
         self.base_headers = {
@@ -239,9 +225,6 @@ class OkalaAPI:
         }
         return self.make_request('POST', url, token, json=payload)
 
-# ==========================================
-# Worker: پردازش اکانت‌های هدف
-# ==========================================
 def worker_copy_basket(file_path, filename, api, template_data):
     time.sleep(random.uniform(0.1, 1.0))
     
@@ -278,9 +261,6 @@ def worker_copy_basket(file_path, filename, api, template_data):
 
     return filename, "success"
 
-# ==========================================
-# هسته اصلی: پردازش الگو
-# ==========================================
 def process_all_baskets(extracted_dir, session_dir, template_query):
     src_accounts = None
     for root, dirs, files in os.walk(extracted_dir):
@@ -289,12 +269,12 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
             break
 
     if not src_accounts:
-        return None, "❌ پوشه 'accounts' داخل فایل زیپ پیدا نشد."
+        return None, "خطا: پوشه accounts در آرشیو یافت نشد."
 
     all_files = sorted([f for f in os.listdir(src_accounts) if os.path.isfile(os.path.join(src_accounts, f))])
     
     if len(all_files) < 2:
-        return None, "❌ فایل زیپ باید حداقل شامل ۲ اکانت باشد (۱ الگو + حداقل ۱ هدف)."
+        return None, "خطا: فایل ارسالی باید حداقل شامل دو اکانت باشد."
 
     template_file = None
     for f in all_files:
@@ -303,11 +283,10 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
             break
 
     if not template_file:
-        return None, f"❌ هیچ اکانتی که شامل عبارت '{template_query}' در نام خود باشد، در فایل زیپ یافت نشد!"
+        return None, f"خطا: اکانتی با شناسه {template_query} یافت نشد."
 
     target_files = [f for f in all_files if f != template_file]
     
-    print(f"\n🚀 شروع عملیات. فایل الگو: {template_file}")
     api = OkalaAPI()
 
     t_path = os.path.join(src_accounts, template_file)
@@ -315,7 +294,7 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
     t_uid = get_user_id_from_token(t_acc)
 
     if not t_uid or t_uid == 0:
-        return None, "❌ ساختار توکن اکانت الگو خراب است."
+        return None, "خطا: ساختار توکن اکانت مرجع معتبر نمی‌باشد."
 
     status, addr_res = api.get_address(t_acc, t_uid)
     if status == 401 and t_ref:
@@ -325,26 +304,26 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
             status, addr_res = api.get_address(t_acc, t_uid)
 
     if status != 200 or not isinstance(addr_res, dict) or not addr_res.get('data'):
-        return None, f"❌ اکانت الگو فاقد آدرس است. پاسخ سرور: {addr_res}"
+        return None, "خطا: اکانت مرجع فاقد اطلاعات آدرس است."
 
     template_addr = addr_res['data'][0]
 
     status, stores_res = api.get_stores(t_acc, template_addr['lat'], template_addr['lng'], t_uid)
     if status != 200 or not isinstance(stores_res, dict) or not stores_res.get('data', {}).get('stores'):
-        return None, f"❌ هیچ فروشگاهی برای آدرس اکانت الگو یافت نشد."
+        return None, "خطا: هیچ فروشگاهی برای مختصات اکانت مرجع یافت نشد."
 
     store_ids = [s['storeId'] for s in stores_res['data']['stores']]
 
     status, cart_res = api.get_cart(t_acc, t_uid, store_ids)
     if status != 200 or not isinstance(cart_res, dict) or not cart_res.get('data', {}).get('result'):
-        return None, f"❌ امکان دریافت سبد خرید اکانت الگو وجود ندارد."
+        return None, "خطا: امکان بازیابی سبد خرید اکانت مرجع وجود ندارد."
 
     cart_data = cart_res['data']['result'][0]
     cart_items = cart_data.get('items', [])
     cart_store_id = cart_data.get('storeId')
 
     if not cart_items:
-        return None, f"❌ سبد خرید اکانت الگو ({template_file}) خالی است!"
+        return None, "خطا: سبد خرید اکانت مرجع خالی است."
 
     addr_text = template_addr.get('address')
     if not addr_text: addr_text = "آدرس ثبت شده"
@@ -361,8 +340,6 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
         'items': cart_items
     }
 
-    print(f"✅ اطلاعات الگو با موفقیت دریافت شد. در حال کپی روی {len(target_files)} اکانت...")
-
     stats = {"total_targets": len(target_files), "success": 0, "error_address": 0, "error_cart": 0, "error_token": 0}
     
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -375,39 +352,33 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
             filename, result = future.result()
             if result == "success":
                 stats["success"] += 1
-                print(f"   ✅ [موفق] {filename} -> کپی سبد انجام شد.")
             elif result in ["error_token", "error_uuid"]:
                 stats["error_token"] += 1
             elif result == "error_address":
                 stats["error_address"] += 1
             elif result == "error_cart":
                 stats["error_cart"] += 1
-                print(f"   ❌ [خطا] {filename} -> افزودن کالا ناموفق.")
 
     final_zip_base = os.path.join(session_dir, "Updated_Accounts")
     final_zip_path = shutil.make_archive(final_zip_base, 'zip', extracted_dir)
 
     return (final_zip_path, template_file, template_data, stats), None
 
-# ==========================================
-# هندلرهای تلگرام
-# ==========================================
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "سلام عرفان! 👋\n\n"
-        "به ربات **کپی‌کننده سبد خرید (نسخه Railway)** خوش آمدی 🛒\n\n"
-        "کافیست فایل زیپ اکانت‌ها را بفرستی."
+        "سیستم مدیریت و همگام‌سازی سبد خرید فعال است.\n\n"
+        "برای شروع، فایل فشرده (ZIP) حاوی اطلاعات اکانت‌ها را ارسال کنید."
     )
 
 @router.message(F.document)
 async def handle_zip_document(message: Message, bot: Bot, state: FSMContext):
     if not message.document.file_name.lower().endswith('.zip'):
-        await message.answer("❌ لطفاً فقط فایل زیپ (.zip) ارسال کن.")
+        await message.answer("خطا: فرمت فایل ارسالی باید ZIP باشد.")
         return
 
-    msg = await message.answer("⏳ در حال دانلود و استخراج فایل...")
+    msg = await message.answer("در حال دریافت و پردازش فایل...")
 
     session_id = str(uuid.uuid4())
     session_dir = os.path.join(SESSION_BASE_DIR, session_id)
@@ -422,7 +393,7 @@ async def handle_zip_document(message: Message, bot: Bot, state: FSMContext):
     try:
         shutil.unpack_archive(zip_path, extracted_dir)
     except Exception:
-        await msg.edit_text("❌ فایل زیپ مشکل دارد و استخراج نشد.")
+        await msg.edit_text("خطا: استخراج آرشیو با شکست مواجه شد.")
         shutil.rmtree(session_dir, ignore_errors=True)
         return
 
@@ -430,8 +401,8 @@ async def handle_zip_document(message: Message, bot: Bot, state: FSMContext):
     await state.set_state(CopierState.waiting_for_template)
 
     await msg.edit_text(
-        "✅ فایل زیپ با موفقیت دریافت و استخراج شد.\n\n"
-        "👇 لطفاً **شماره موبایل اکانت الگو** (یا بخشی از نام فایل آن) را در چت بفرست تا ربات آن را پیدا کند و عملیات آغاز شود:"
+        "فایل با موفقیت استخراج شد.\n\n"
+        "لطفاً شماره موبایل یا شناسه اکانت مرجع (الگو) را جهت ادامه عملیات وارد کنید:"
     )
 
 @router.message(CopierState.waiting_for_template, F.text)
@@ -444,7 +415,7 @@ async def handle_template_number(message: Message, state: FSMContext, bot: Bot):
 
     await state.clear()
 
-    msg = await message.answer(f"🔍 در حال جستجوی اکانت حاوی ` {template_query} ` و اجرای عملیات کپی...")
+    msg = await message.answer("عملیات همگام‌سازی در حال اجرا است...")
     
     result_data, error_msg = await asyncio.to_thread(process_all_baskets, extracted_dir, session_dir, template_query)
 
@@ -459,25 +430,24 @@ async def handle_template_number(message: Message, state: FSMContext, bot: Bot):
     total_qty = sum(item['quantity'] for item in template_data['items'])
 
     report_text = (
-        "📊 <b>گزارش نهایی کپی سبد خرید:</b>\n\n"
-        f"👑 <b>اکانت الگو:</b> {template_file}\n"
-        f"🛒 <b>سبد الگو:</b> {len(template_data['items'])} مدل کالا (تعداد کل: {total_qty} عدد)\n\n"
-        f"🎯 کل اکانت‌های هدف: <b>{stats['total_targets']}</b>\n"
-        f"✅ کپی موفق: <b>{stats['success']}</b> اکانت\n"
-        f"❌ خطای ثبت آدرس: <b>{stats['error_address']}</b> اکانت\n"
-        f"❌ خطای افزودن کالا: <b>{stats['error_cart']}</b> اکانت\n"
-        f"🔒 منقضی/بدون توکن: <b>{stats['error_token']}</b> اکانت\n\n"
-        "👇 <b>فایل نهایی ضمیمه شد:</b>"
+        "گزارش عملکرد همگام‌سازی سبد خرید:\n\n"
+        f"اکانت مرجع: {template_file}\n"
+        f"تعداد اقلام مرجع: {len(template_data['items'])} مدل (مجموع: {total_qty} عدد)\n\n"
+        f"تعداد کل اهداف: {stats['total_targets']}\n"
+        f"عملیات موفق: {stats['success']}\n"
+        f"خطای ثبت آدرس: {stats['error_address']}\n"
+        f"خطای افزودن کالا: {stats['error_cart']}\n"
+        f"خطای احراز هویت / توکن: {stats['error_token']}\n\n"
+        "فایل خروجی ضمیمه گردید."
     )
 
-    await message.answer_document(document=FSInputFile(final_zip_path), caption=report_text, parse_mode="HTML")
+    await message.answer_document(document=FSInputFile(final_zip_path), caption=report_text)
     shutil.rmtree(session_dir, ignore_errors=True)
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
-    print("🤖 Basket Copier Bot (Railway Ready) is running...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
