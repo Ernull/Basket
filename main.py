@@ -8,6 +8,7 @@ import time
 import uuid
 import random
 import re
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, FSInputFile
@@ -115,6 +116,7 @@ def get_user_id_from_token(token):
 
 class OkalaAPI:
     def __init__(self):
+        self.request_logs = []  # ذخیره لیست تمام لاگ‌ها
         self.base_headers = {
             'accept': 'application/json, text/plain, */*',
             'source': 'okala',
@@ -125,6 +127,11 @@ class OkalaAPI:
             'sec-ch-ua-platform': '"Android"',
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/137.0.0.0 Mobile'
         }
+
+    def log_request(self, method, url, status_code, response_text):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {method} {url}\nStatus: {status_code}\nResponse: {response_text}\n{'-'*50}\n"
+        self.request_logs.append(log_entry)
 
     def make_request(self, method, url, access_token=None, **kwargs):
         headers = self.base_headers.copy()
@@ -142,6 +149,8 @@ class OkalaAPI:
             current_proxy = get_random_proxy()
             try:
                 res = requests.request(method, url, headers=headers, proxies=current_proxy, timeout=45, **kwargs)
+                self.log_request(method, url, res.status_code, res.text)
+                
                 if res.status_code == 200:
                     try:
                         return 200, res.json()
@@ -151,7 +160,8 @@ class OkalaAPI:
                     return 401, {}
                 else:
                     return res.status_code, res.text 
-            except Exception:
+            except Exception as e:
+                self.log_request(method, url, "EXCEPTION", str(e))
                 time.sleep(1.5)
                 continue
                 
@@ -179,15 +189,9 @@ class OkalaAPI:
     def add_address(self, token, uid, addr_data):
         url = 'https://apigateway.okala.com/api/voyager/C/CustomerAccount/AddAddress/'
         
-        plaque_val = addr_data.get('plaque')
-        if not plaque_val or plaque_val == "None": plaque_val = '0'
-        
-        unit_val = addr_data.get('unit')
-        if not unit_val or unit_val == "None": unit_val = '1'
-
-        address_text = addr_data.get('address')
-        if not address_text or str(address_text).strip() == "":
-            address_text = "آدرس ثبت شده"
+        plaque_val = addr_data.get('plaque', '0')
+        unit_val = addr_data.get('unit', '1')
+        address_text = addr_data.get('address', 'آدرس ثبت شده از نقشه')
 
         payload = {
             'id': 0, 
@@ -225,6 +229,7 @@ class OkalaAPI:
             'productStoreId': '0', 'queryId': None
         }
         return self.make_request('POST', url, token, json=payload)
+
 
 def worker_copy_basket(target_url, api, template_data):
     time.sleep(random.uniform(0.1, 1.0))
@@ -266,18 +271,19 @@ def worker_copy_basket(target_url, api, template_data):
 
     return target_url, "success", data
 
+
 def process_all_links(session_dir, template_url, target_urls):
     api = OkalaAPI()
 
     template_data_json = fetch_data(template_url)
     if not template_data_json:
-        return None, "خطا: امکان دریافت اطلاعات اکانت مرجع (اولین لینک) وجود ندارد."
+        return None, None, "خطا: امکان دریافت اطلاعات اکانت مرجع (اولین لینک) وجود ندارد."
 
     t_acc, t_ref = get_tokens_from_data(template_data_json)
     t_uid = get_user_id_from_token(t_acc)
 
     if not t_uid or t_uid == 0:
-        return None, "خطا: ساختار توکن اکانت مرجع معتبر نمی‌باشد."
+        return None, None, "خطا: ساختار توکن اکانت مرجع معتبر نمی‌باشد."
 
     status, addr_res = api.get_address(t_acc, t_uid)
     if status == 401 and t_ref:
@@ -286,36 +292,57 @@ def process_all_links(session_dir, template_url, target_urls):
             template_data_json = update_tokens_in_data(template_data_json, t_acc, t_acc, t_ref, t_ref)
             status, addr_res = api.get_address(t_acc, t_uid)
 
-    if status != 200 or not isinstance(addr_res, dict) or not addr_res.get('data'):
-        return None, "خطا: اکانت مرجع فاقد اطلاعات آدرس است."
-
-    template_addr = addr_res['data'][0]
+    template_addr = None
+    if status == 200 and isinstance(addr_res, dict) and addr_res.get('data'):
+        # آدرس از API با موفقیت دریافت شد
+        template_addr = addr_res['data'][0]
+    else:
+        # مکانیزم هوشمند جایگزین (Fallback) در صورتی که کاربر هیچ آدرسی ثبت نکرده باشد
+        api.request_logs.append(f"INFO: No saved address found for template account. Using mapInfo as fallback.\n{'-'*50}\n")
+        lat, lng = 35.69975, 51.33551 # مختصات پیش‌فرض (تهران) در صورت خطا
+        addr_text = "آدرس استخراج شده از نقشه"
+        try:
+            for origin in template_data_json.get('origins', []):
+                for item in origin.get('localStorage', []):
+                    if item.get('name') == 'mapInfo':
+                        map_info = json.loads(item.get('value'))
+                        if 'selectedCity' in map_info:
+                            lat = map_info['selectedCity']['lat']
+                            lng = map_info['selectedCity']['lng']
+                            addr_text = map_info['selectedCity'].get('name', addr_text)
+        except Exception as e:
+            api.request_logs.append(f"ERROR parsing mapInfo: {e}\n{'-'*50}\n")
+            
+        template_addr = {
+            'lat': lat,
+            'lng': lng,
+            'address': addr_text,
+            'plaque': '0',
+            'unit': '1'
+        }
 
     status, stores_res = api.get_stores(t_acc, template_addr['lat'], template_addr['lng'], t_uid)
     if status != 200 or not isinstance(stores_res, dict) or not stores_res.get('data', {}).get('stores'):
-        return None, "خطا: هیچ فروشگاهی برای مختصات اکانت مرجع یافت نشد."
+        return None, api.request_logs, "خطا: هیچ فروشگاهی برای مختصات اکانت مرجع یافت نشد."
 
     store_ids = [s['storeId'] for s in stores_res['data']['stores']]
 
     status, cart_res = api.get_cart(t_acc, t_uid, store_ids)
     if status != 200 or not isinstance(cart_res, dict) or not cart_res.get('data', {}).get('result'):
-        return None, "خطا: امکان بازیابی سبد خرید اکانت مرجع وجود ندارد."
+        return None, api.request_logs, "خطا: امکان بازیابی سبد خرید اکانت مرجع وجود ندارد."
 
     cart_data = cart_res['data']['result'][0]
     cart_items = cart_data.get('items', [])
     cart_store_id = cart_data.get('storeId')
 
     if not cart_items:
-        return None, "خطا: سبد خرید اکانت مرجع خالی است."
-
-    addr_text = template_addr.get('address')
-    if not addr_text: addr_text = "آدرس ثبت شده"
+        return None, api.request_logs, "خطا: سبد خرید اکانت مرجع خالی است."
 
     template_data = {
         'address': {
             'lat': template_addr['lat'],
             'lng': template_addr['lng'],
-            'address': addr_text,
+            'address': template_addr.get('address', 'آدرس ثبت شده'),
             'plaque': template_addr.get('plaque', '0'),
             'unit': template_addr.get('unit', '1')
         },
@@ -332,11 +359,9 @@ def process_all_links(session_dir, template_url, target_urls):
         "error_token": 0
     }
     
-    # پوشه ذخیره آپدیت‌ها (برای مواقعی که توکن‌ها رفرش شده‌اند)
     updated_dir = os.path.join(session_dir, "Updated_Accounts")
     os.makedirs(updated_dir, exist_ok=True)
 
-    # ذخیره اکانت الگو
     with open(os.path.join(updated_dir, "template_account.json"), "w", encoding="utf-8") as f:
         json.dump(template_data_json, f, ensure_ascii=False, indent=2)
 
@@ -362,7 +387,6 @@ def process_all_links(session_dir, template_url, target_urls):
                 elif result == "error_cart":
                     stats["error_cart"] += 1
                 
-                # ذخیره JSON جدید با استخراج شناسه از لینک (یا اسمگذاری خودکار)
                 if updated_json:
                     file_name = url.strip('/').split('/')[-1]
                     if not file_name or len(file_name) < 5:
@@ -376,19 +400,19 @@ def process_all_links(session_dir, template_url, target_urls):
     final_zip_base = os.path.join(session_dir, "Updated_Accounts_Data")
     final_zip_path = shutil.make_archive(final_zip_base, 'zip', updated_dir)
 
-    return (final_zip_path, template_data, stats), None
+    return (final_zip_path, template_data, stats), api.request_logs, None
+
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "سیستم همگام‌سازی سبد خرید از طریق لینک فعال است.\n\n"
+        "سیستم همگام‌سازی سبد خرید فعال است.\n\n"
         "لطفاً لیست لینک‌های خود را در یک پیام بفرستید.\n\n"
         "🟢 توجه: **اولین لینک** ارسالی در پیام، به عنوان اکانت **مرجع (الگو)** شناخته خواهد شد."
     )
 
 @router.message(F.text)
 async def handle_links_message(message: Message):
-    # استخراج تمامی لینک‌ها از پیام ارسال شده
     urls = re.findall(r'(https?://\S+)', message.text)
     
     if len(urls) < 2:
@@ -404,11 +428,18 @@ async def handle_links_message(message: Message):
     session_dir = os.path.join(SESSION_BASE_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
     
-    # پردازش در یک Thread جداگانه تا ربات هنگ نکند
-    result_data, error_msg = await asyncio.to_thread(process_all_links, session_dir, template_url, target_urls)
+    result_data, logs, error_msg = await asyncio.to_thread(process_all_links, session_dir, template_url, target_urls)
+
+    # ایجاد فایل گزارش دیباگ در هر شرایطی (حتی اگر خطا رخ داده باشد)
+    log_file_path = os.path.join(session_dir, "debug_report.txt")
+    if logs:
+        with open(log_file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(logs))
 
     if error_msg:
         await msg.edit_text(error_msg)
+        if os.path.exists(log_file_path):
+            await message.answer_document(document=FSInputFile(log_file_path), caption="فایل گزارش خطاها (Debug Log)")
         shutil.rmtree(session_dir, ignore_errors=True)
         return
 
@@ -426,10 +457,13 @@ async def handle_links_message(message: Message):
         f"🔴 خطای ثبت آدرس: {stats['error_address']}\n"
         f"🔴 خطای افزودن کالا: {stats['error_cart']}\n"
         f"🔴 خطای احراز هویت / توکن: {stats['error_token']}\n\n"
-        "فایل ZIP پیوست شامل اطلاعات آپدیت‌شده اکانت‌ها (در صورت رفرش توکن) است."
+        "فایل ZIP اکانت‌ها و فایل Debug پیوست شدند."
     )
 
     await message.answer_document(document=FSInputFile(final_zip_path), caption=report_text)
+    if os.path.exists(log_file_path):
+        await message.answer_document(document=FSInputFile(log_file_path), caption="گزارش کامل درخواست‌ها و پاسخ‌های سرور (Debug Log)")
+    
     shutil.rmtree(session_dir, ignore_errors=True)
 
 async def main():
