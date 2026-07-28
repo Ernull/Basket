@@ -7,12 +7,11 @@ import requests
 import time
 import uuid
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, FSInputFile
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -22,9 +21,6 @@ SESSION_BASE_DIR = "basket_sessions"
 if os.path.exists(SESSION_BASE_DIR):
     shutil.rmtree(SESSION_BASE_DIR, ignore_errors=True)
 os.makedirs(SESSION_BASE_DIR, exist_ok=True)
-
-class CopierState(StatesGroup):
-    waiting_for_template = State()
 
 PROXY_LIST = [
     "http://n4w32tknlcwt:cr4ownjm7lrjb1a@216.26.233.27:3129",
@@ -64,39 +60,44 @@ def get_random_proxy():
     selected = random.choice(PROXY_LIST)
     return {"http": selected, "https": selected}
 
-def get_tokens_from_file(file_path):
+def fetch_data(url):
+    try:
+        res = requests.get(url, timeout=15)
+        if res.status_code == 200:
+            return res.json()
+    except Exception:
+        pass
+    return None
+
+def get_tokens_from_data(data):
     access_token, refresh_token = None, None
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for cookie in data.get('cookies', []):
-                if cookie.get('name') == 'tokenMS':
-                    access_token = cookie.get('value')
-                elif cookie.get('name') == 'refresh_token':
-                    refresh_token = cookie.get('value')
-            if not access_token or not refresh_token:
-                for origin in data.get('origins', []):
-                    for item in origin.get('localStorage', []):
-                        if item.get('name') == 'tokenMS':
-                            access_token = item.get('value')
-                        elif item.get('name') == 'refresh_token':
-                            refresh_token = item.get('value')
+        for cookie in data.get('cookies', []):
+            if cookie.get('name') == 'tokenMS':
+                access_token = cookie.get('value')
+            elif cookie.get('name') == 'refresh_token':
+                refresh_token = cookie.get('value')
+        if not access_token or not refresh_token:
+            for origin in data.get('origins', []):
+                for item in origin.get('localStorage', []):
+                    if item.get('name') == 'tokenMS':
+                        access_token = item.get('value')
+                    elif item.get('name') == 'refresh_token':
+                        refresh_token = item.get('value')
     except Exception:
         pass
     return access_token, refresh_token
 
-def update_file_with_new_tokens(file_path, old_acc, new_acc, old_ref, new_ref):
+def update_tokens_in_data(data, old_acc, new_acc, old_ref, new_ref):
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = json.dumps(data, ensure_ascii=False)
         if old_acc and new_acc:
             content = content.replace(old_acc, new_acc)
         if old_ref and new_ref:
             content = content.replace(old_ref, new_ref)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
+        return json.loads(content)
     except Exception:
-        pass
+        return data
 
 def get_user_id_from_token(token):
     try:
@@ -225,28 +226,32 @@ class OkalaAPI:
         }
         return self.make_request('POST', url, token, json=payload)
 
-def worker_copy_basket(file_path, filename, api, template_data):
+def worker_copy_basket(target_url, api, template_data):
     time.sleep(random.uniform(0.1, 1.0))
     
-    acc_token, ref_token = get_tokens_from_file(file_path)
+    data = fetch_data(target_url)
+    if not data:
+        return target_url, "error_fetch", None
+    
+    acc_token, ref_token = get_tokens_from_data(data)
     if not acc_token:
-        return filename, "error_token"
+        return target_url, "error_token", data
 
     uid = get_user_id_from_token(acc_token)
     if not uid or uid == 0:
-        return filename, "error_uuid"
+        return target_url, "error_uuid", data
 
     status, response_data = api.add_address(acc_token, uid, template_data['address'])
     
     if status == 401 and ref_token:
         new_acc, new_ref = api.refresh_token(ref_token)
         if new_acc:
-            update_file_with_new_tokens(file_path, acc_token, new_acc, ref_token, new_ref)
+            data = update_tokens_in_data(data, acc_token, new_acc, ref_token, new_ref)
             acc_token = new_acc
             status, response_data = api.add_address(acc_token, uid, template_data['address'])
 
     if status != 200:
-        return filename, "error_address"
+        return target_url, "error_address", data
 
     added_count = 0
     for item in template_data['items']:
@@ -257,40 +262,18 @@ def worker_copy_basket(file_path, filename, api, template_data):
             time.sleep(random.uniform(0.3, 0.8))
 
     if added_count == 0 and len(template_data['items']) > 0:
-        return filename, "error_cart"
+        return target_url, "error_cart", data
 
-    return filename, "success"
+    return target_url, "success", data
 
-def process_all_baskets(extracted_dir, session_dir, template_query):
-    src_accounts = None
-    for root, dirs, files in os.walk(extracted_dir):
-        if 'accounts' in dirs and not src_accounts:
-            src_accounts = os.path.join(root, 'accounts')
-            break
-
-    if not src_accounts:
-        return None, "خطا: پوشه accounts در آرشیو یافت نشد."
-
-    all_files = sorted([f for f in os.listdir(src_accounts) if os.path.isfile(os.path.join(src_accounts, f))])
-    
-    if len(all_files) < 2:
-        return None, "خطا: فایل ارسالی باید حداقل شامل دو اکانت باشد."
-
-    template_file = None
-    for f in all_files:
-        if template_query in f:
-            template_file = f
-            break
-
-    if not template_file:
-        return None, f"خطا: اکانتی با شناسه {template_query} یافت نشد."
-
-    target_files = [f for f in all_files if f != template_file]
-    
+def process_all_links(session_dir, template_url, target_urls):
     api = OkalaAPI()
 
-    t_path = os.path.join(src_accounts, template_file)
-    t_acc, t_ref = get_tokens_from_file(t_path)
+    template_data_json = fetch_data(template_url)
+    if not template_data_json:
+        return None, "خطا: امکان دریافت اطلاعات اکانت مرجع (اولین لینک) وجود ندارد."
+
+    t_acc, t_ref = get_tokens_from_data(template_data_json)
     t_uid = get_user_id_from_token(t_acc)
 
     if not t_uid or t_uid == 0:
@@ -300,7 +283,7 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
     if status == 401 and t_ref:
         t_acc, t_ref = api.refresh_token(t_ref)
         if t_acc:
-            update_file_with_new_tokens(t_path, t_acc, t_acc, t_ref, t_ref)
+            template_data_json = update_tokens_in_data(template_data_json, t_acc, t_acc, t_ref, t_ref)
             status, addr_res = api.get_address(t_acc, t_uid)
 
     if status != 200 or not isinstance(addr_res, dict) or not addr_res.get('data'):
@@ -340,105 +323,110 @@ def process_all_baskets(extracted_dir, session_dir, template_query):
         'items': cart_items
     }
 
-    stats = {"total_targets": len(target_files), "success": 0, "error_address": 0, "error_cart": 0, "error_token": 0}
+    stats = {
+        "total_targets": len(target_urls), 
+        "success": 0, 
+        "error_fetch": 0, 
+        "error_address": 0, 
+        "error_cart": 0, 
+        "error_token": 0
+    }
     
+    # پوشه ذخیره آپدیت‌ها (برای مواقعی که توکن‌ها رفرش شده‌اند)
+    updated_dir = os.path.join(session_dir, "Updated_Accounts")
+    os.makedirs(updated_dir, exist_ok=True)
+
+    # ذخیره اکانت الگو
+    with open(os.path.join(updated_dir, "template_account.json"), "w", encoding="utf-8") as f:
+        json.dump(template_data_json, f, ensure_ascii=False, indent=2)
+
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
-            executor.submit(worker_copy_basket, os.path.join(src_accounts, filename), filename, api, template_data): filename 
-            for filename in target_files
+            executor.submit(worker_copy_basket, url, api, template_data): url 
+            for url in target_urls
         }
         
+        counter = 1
         for future in as_completed(futures):
-            filename, result = future.result()
-            if result == "success":
-                stats["success"] += 1
-            elif result in ["error_token", "error_uuid"]:
-                stats["error_token"] += 1
-            elif result == "error_address":
-                stats["error_address"] += 1
-            elif result == "error_cart":
-                stats["error_cart"] += 1
+            url = futures[future]
+            try:
+                _, result, updated_json = future.result()
+                if result == "success":
+                    stats["success"] += 1
+                elif result == "error_fetch":
+                    stats["error_fetch"] += 1
+                elif result in ["error_token", "error_uuid"]:
+                    stats["error_token"] += 1
+                elif result == "error_address":
+                    stats["error_address"] += 1
+                elif result == "error_cart":
+                    stats["error_cart"] += 1
+                
+                # ذخیره JSON جدید با استخراج شناسه از لینک (یا اسمگذاری خودکار)
+                if updated_json:
+                    file_name = url.strip('/').split('/')[-1]
+                    if not file_name or len(file_name) < 5:
+                        file_name = f"target_account_{counter}"
+                    with open(os.path.join(updated_dir, f"{file_name}.json"), "w", encoding="utf-8") as f:
+                        json.dump(updated_json, f, ensure_ascii=False, indent=2)
+                counter += 1
+            except Exception:
+                stats["error_fetch"] += 1
 
-    final_zip_base = os.path.join(session_dir, "Updated_Accounts")
-    final_zip_path = shutil.make_archive(final_zip_base, 'zip', extracted_dir)
+    final_zip_base = os.path.join(session_dir, "Updated_Accounts_Data")
+    final_zip_path = shutil.make_archive(final_zip_base, 'zip', updated_dir)
 
-    return (final_zip_path, template_file, template_data, stats), None
+    return (final_zip_path, template_data, stats), None
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
+async def cmd_start(message: Message):
     await message.answer(
-        "سیستم مدیریت و همگام‌سازی سبد خرید فعال است.\n\n"
-        "برای شروع، فایل فشرده (ZIP) حاوی اطلاعات اکانت‌ها را ارسال کنید."
+        "سیستم همگام‌سازی سبد خرید از طریق لینک فعال است.\n\n"
+        "لطفاً لیست لینک‌های خود را در یک پیام بفرستید.\n\n"
+        "🟢 توجه: **اولین لینک** ارسالی در پیام، به عنوان اکانت **مرجع (الگو)** شناخته خواهد شد."
     )
 
-@router.message(F.document)
-async def handle_zip_document(message: Message, bot: Bot, state: FSMContext):
-    if not message.document.file_name.lower().endswith('.zip'):
-        await message.answer("خطا: فرمت فایل ارسالی باید ZIP باشد.")
+@router.message(F.text)
+async def handle_links_message(message: Message):
+    # استخراج تمامی لینک‌ها از پیام ارسال شده
+    urls = re.findall(r'(https?://\S+)', message.text)
+    
+    if len(urls) < 2:
+        await message.answer("خطا: لطفاً حداقل ۲ لینک (یک الگو و حداقل یک هدف) ارسال کنید.")
         return
 
-    msg = await message.answer("در حال دریافت و پردازش فایل...")
+    template_url = urls[0]
+    target_urls = urls[1:]
+
+    msg = await message.answer(f"در حال پردازش...\nاکانت مرجع دریافت شد. تعداد اهداف: {len(target_urls)}")
 
     session_id = str(uuid.uuid4())
     session_dir = os.path.join(SESSION_BASE_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
     
-    extracted_dir = os.path.join(session_dir, "extracted")
-    zip_path = os.path.join(session_dir, "uploaded.zip")
-    
-    file_info = await bot.get_file(message.document.file_id)
-    await bot.download_file(file_info.file_path, zip_path)
-    
-    try:
-        shutil.unpack_archive(zip_path, extracted_dir)
-    except Exception:
-        await msg.edit_text("خطا: استخراج آرشیو با شکست مواجه شد.")
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return
-
-    await state.update_data(session_dir=session_dir, extracted_dir=extracted_dir)
-    await state.set_state(CopierState.waiting_for_template)
-
-    await msg.edit_text(
-        "فایل با موفقیت استخراج شد.\n\n"
-        "لطفاً شماره موبایل یا شناسه اکانت مرجع (الگو) را جهت ادامه عملیات وارد کنید:"
-    )
-
-@router.message(CopierState.waiting_for_template, F.text)
-async def handle_template_number(message: Message, state: FSMContext, bot: Bot):
-    template_query = message.text.strip()
-    
-    data = await state.get_data()
-    session_dir = data.get('session_dir')
-    extracted_dir = data.get('extracted_dir')
-
-    await state.clear()
-
-    msg = await message.answer("عملیات همگام‌سازی در حال اجرا است...")
-    
-    result_data, error_msg = await asyncio.to_thread(process_all_baskets, extracted_dir, session_dir, template_query)
+    # پردازش در یک Thread جداگانه تا ربات هنگ نکند
+    result_data, error_msg = await asyncio.to_thread(process_all_links, session_dir, template_url, target_urls)
 
     if error_msg:
         await msg.edit_text(error_msg)
         shutil.rmtree(session_dir, ignore_errors=True)
         return
 
-    final_zip_path, template_file, template_data, stats = result_data
+    final_zip_path, template_data, stats = result_data
     await msg.delete()
 
     total_qty = sum(item['quantity'] for item in template_data['items'])
 
     report_text = (
-        "گزارش عملکرد همگام‌سازی سبد خرید:\n\n"
-        f"اکانت مرجع: {template_file}\n"
+        "✅ گزارش عملکرد همگام‌سازی:\n\n"
         f"تعداد اقلام مرجع: {len(template_data['items'])} مدل (مجموع: {total_qty} عدد)\n\n"
         f"تعداد کل اهداف: {stats['total_targets']}\n"
-        f"عملیات موفق: {stats['success']}\n"
-        f"خطای ثبت آدرس: {stats['error_address']}\n"
-        f"خطای افزودن کالا: {stats['error_cart']}\n"
-        f"خطای احراز هویت / توکن: {stats['error_token']}\n\n"
-        "فایل خروجی ضمیمه گردید."
+        f"🟢 موفق: {stats['success']}\n"
+        f"🔴 خطای دریافت از لینک: {stats['error_fetch']}\n"
+        f"🔴 خطای ثبت آدرس: {stats['error_address']}\n"
+        f"🔴 خطای افزودن کالا: {stats['error_cart']}\n"
+        f"🔴 خطای احراز هویت / توکن: {stats['error_token']}\n\n"
+        "فایل ZIP پیوست شامل اطلاعات آپدیت‌شده اکانت‌ها (در صورت رفرش توکن) است."
     )
 
     await message.answer_document(document=FSInputFile(final_zip_path), caption=report_text)
