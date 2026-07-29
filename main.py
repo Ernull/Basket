@@ -212,17 +212,20 @@ class OkalaAPI:
         return self.make_request('POST', url, token, json=payload)
 
     def get_stores(self, token, lat, lng, uid):
-        url = 'https://apigateway.okala.com/api/Lucifer/v1/StoreRanking/GetAllStores'
-        params = {'latitude': lat, 'longitude': lng, 'CustomerId': uid, 'IsMsBasketEnable': 'true'}
+        # تغییر مسیر از Lucifer قدیمی به Opex V4 جدید (مشکل ارور ۴۰۴ حل شد)
+        url = 'https://apigateway.okala.com/api/opex/v4/stores/nearby'
+        params = {'latitude': lat, 'longitude': lng}
         return self.make_request('GET', url, token, params=params)
 
     def get_cart(self, token, uid, store_ids):
-        url = 'https://apigateway.okala.com/api/Basket/v2/ShoppingCart/GetCustomerShoppingCartItems'
+        # ارتقای API سبد خرید به نسخه v4
+        url = 'https://apigateway.okala.com/api/Basket/v4/ShoppingCart/GetCustomerShoppingCartItems'
         params = {'CustomerId': uid, 'StoreIds': store_ids, 'isFromCartPage': 'false'}
         return self.make_request('GET', url, token, params=params)
 
     def add_to_cart(self, token, uid, store_id, product_id):
-        url = 'https://apigateway.okala.com/api/Basket/v2/ShoppingCart/AddToShoppingCart'
+        # ارتقای API افزودن به سبد خرید به نسخه v4
+        url = 'https://apigateway.okala.com/api/Basket/v4/ShoppingCart/AddToShoppingCart'
         payload = {
             'storeId': store_id, 'customerId': uid, 'productId': product_id, 'quantity': 1,
             'isSupplier': False, 'replaceItemMethodCode': -1, 'sectorId': '0', 'sectorPartId': '0',
@@ -294,12 +297,10 @@ def process_all_links(session_dir, template_url, target_urls):
 
     template_addr = None
     if status == 200 and isinstance(addr_res, dict) and addr_res.get('data'):
-        # آدرس از API با موفقیت دریافت شد
         template_addr = addr_res['data'][0]
     else:
-        # مکانیزم هوشمند جایگزین (Fallback) در صورتی که کاربر هیچ آدرسی ثبت نکرده باشد
         api.request_logs.append(f"INFO: No saved address found for template account. Using mapInfo as fallback.\n{'-'*50}\n")
-        lat, lng = 35.69975, 51.33551 # مختصات پیش‌فرض (تهران) در صورت خطا
+        lat, lng = 35.69975, 51.33551
         addr_text = "آدرس استخراج شده از نقشه"
         try:
             for origin in template_data_json.get('origins', []):
@@ -430,7 +431,6 @@ async def handle_links_message(message: Message):
     
     result_data, logs, error_msg = await asyncio.to_thread(process_all_links, session_dir, template_url, target_urls)
 
-    # ایجاد فایل گزارش دیباگ در هر شرایطی (حتی اگر خطا رخ داده باشد)
     log_file_path = os.path.join(session_dir, "debug_report.txt")
     if logs:
         with open(log_file_path, "w", encoding="utf-8") as f:
