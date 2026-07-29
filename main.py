@@ -116,7 +116,7 @@ def get_user_id_from_token(token):
 
 class OkalaAPI:
     def __init__(self):
-        self.request_logs = []  # ذخیره لیست تمام لاگ‌ها
+        self.request_logs = []
         self.base_headers = {
             'accept': 'application/json, text/plain, */*',
             'source': 'okala',
@@ -212,20 +212,20 @@ class OkalaAPI:
         return self.make_request('POST', url, token, json=payload)
 
     def get_stores(self, token, lat, lng, uid):
-        # تغییر مسیر از Lucifer قدیمی به Opex V4 جدید (مشکل ارور ۴۰۴ حل شد)
+        # دریافت لیست فروشگاه ها با API جدید V4
         url = 'https://apigateway.okala.com/api/opex/v4/stores/nearby'
         params = {'latitude': lat, 'longitude': lng}
         return self.make_request('GET', url, token, params=params)
 
     def get_cart(self, token, uid, store_ids):
-        # ارتقای API سبد خرید به نسخه v4
+        # دریافت سبد خرید با API جدید V4
         url = 'https://apigateway.okala.com/api/Basket/v4/ShoppingCart/GetCustomerShoppingCartItems'
         params = {'CustomerId': uid, 'StoreIds': store_ids, 'isFromCartPage': 'false'}
         return self.make_request('GET', url, token, params=params)
 
     def add_to_cart(self, token, uid, store_id, product_id):
-        # ارتقای API افزودن به سبد خرید به نسخه v4
-        url = 'https://apigateway.okala.com/api/Basket/v4/ShoppingCart/AddToShoppingCart'
+        # بازگرداندن مسیر افزودن کالا به نسخه v2 (برای جلوگیری از ارور 404)
+        url = 'https://apigateway.okala.com/api/Basket/v2/ShoppingCart/AddToShoppingCart'
         payload = {
             'storeId': store_id, 'customerId': uid, 'productId': product_id, 'quantity': 1,
             'isSupplier': False, 'replaceItemMethodCode': -1, 'sectorId': '0', 'sectorPartId': '0',
